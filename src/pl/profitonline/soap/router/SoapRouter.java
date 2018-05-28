@@ -45,7 +45,7 @@ public class SoapRouter implements Callable {
 		String action = (String)eventContext.getMessage().getInboundProperty("SOAPAction");
 		if(action == null) throw new MissingHeaderException("SOAPAction");
 		
-		Pattern pattern = Pattern.compile("(.*)/(.*)");
+		Pattern pattern = Pattern.compile("\"(.*)/(.*)\"");
 		Matcher m = pattern.matcher(action);
 		
 		String operation = null;
