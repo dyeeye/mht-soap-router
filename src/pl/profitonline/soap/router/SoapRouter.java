@@ -12,6 +12,11 @@ import java.util.regex.Pattern;
 import javax.xml.transform.stream.StreamSource;
 
 import org.apache.commons.io.IOUtils;
+import org.dom4j.Document;
+import org.dom4j.DocumentException;
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.Node;
 import org.mule.RequestContext;
 import org.mule.api.MuleEvent;
 import org.mule.api.MuleEventContext;
@@ -28,7 +33,7 @@ import pl.profitonline.soap.xml.XMLValidator;
 public class SoapRouter implements Callable {
 	
 	private SoapRouterConfiguration configuration;
-	private String wsdl;
+	private Element wsdl;
 	private List<String> schemas;
 	
 	public SoapRouter(SoapRouterConfiguration configuration) throws SoapRouterException {
@@ -41,20 +46,20 @@ public class SoapRouter implements Callable {
 	@Override
 	public Object onCall(MuleEventContext eventContext) throws Exception {
 		
-		// prepare flow name
+		// match wsdl operation
 		String action = (String)eventContext.getMessage().getInboundProperty("SOAPAction");
 		if(action == null) throw new MissingHeaderException("SOAPAction");
-		
-		Pattern pattern = Pattern.compile("\"(.*)/(.*)\"");
-		Matcher m = pattern.matcher(action);
-		
+
+		Node wsdlOperation = wsdl.selectSingleNode(String.format("/definitions/*[local-name()='binding'][@name='%s']//*[local-name()='operation'][@soapAction=%s]/../@name", 
+				configuration.getPort(), action));
 		String operation = null;
-		
-		if(m.find()) {
-			operation = m.group(2);
+		if(wsdlOperation == null) {
+			throw new SoapRouterException("Operation not found");
+		}else {
+			operation = wsdlOperation.getText();
 		}
-		
-		//extract flow name
+	
+		//prepare flow name
 		StringBuilder flowNameBuilder = new StringBuilder();
 		flowNameBuilder
 			.append("/")
@@ -70,8 +75,14 @@ public class SoapRouter implements Callable {
 		Flow flowOperation = (Flow) eventContext.getMuleContext().getRegistry().lookupFlowConstruct(flowNameBuilder.toString());
 		if(flowOperation == null) throw new NotImplementedOperationException(flowNameBuilder.toString());
 		
+		String inMsg = wsdl.selectSingleNode(String.format("/definitions/*[local-name()= 'portType'][@name='%s']/*[local-name()='operation'][@name='%s']/*[local-name()='input']/@message", 
+				configuration.getPort(), operation))
+				.getText();
+
+		Node inElementName = wsdl.selectSingleNode(String.format("/definitions/*[local-name()='message'][@name='%s']/*[local-name()='part']/@element", inMsg.substring(inMsg.indexOf(":")+1)));
+		
 		//validate incoming message
-		validateBody(eventContext.getMessage().getPayloadAsString(), true);
+		validateBody(eventContext.getMessage().getPayloadAsString(), inElementName.getText(), true);
 		
 		//sent validated message to proper private flow
 		MuleEvent inEvent = RequestContext.getEvent();
@@ -81,13 +92,18 @@ public class SoapRouter implements Callable {
 		String outputEnvelope =  outEvent.getMessage().getPayloadAsString();
 		
 		//validate response message
-		validateBody(eventContext.getMessage().getPayloadAsString(), false);
+		String outMsg = wsdl.selectSingleNode(String.format("/definitions/*[local-name()= 'portType'][@name='%s']/*[local-name()='operation'][@name='%s']/*[local-name()='output']/@message", 
+				configuration.getPort(), operation))
+				.getText();
+		Node outElementName = wsdl.selectSingleNode(String.format("/definitions/*[local-name()='message'][@name='%s']/*[local-name()='part']/@element", outMsg.substring(outMsg.indexOf(":")+1)));
+		
+		validateBody(eventContext.getMessage().getPayloadAsString(), outElementName.getText(), false);
 		
 		return outputEnvelope;
 	}
 	
-	private void validateBody(String soapEnvelope, boolean rethrowError) throws Exception {
-		String soapBody = XMLPreparator.unenvelopeMessage(soapEnvelope);
+	private void validateBody(String soapEnvelope, String message, boolean rethrowError) throws Exception {
+		String soapBody = XMLPreparator.unenvelopeMessage(soapEnvelope, message);
 		
 		try{
 			XMLValidator.validate(soapBody, schemas);
@@ -109,8 +125,9 @@ public class SoapRouter implements Callable {
 	private void loadFiles() throws SoapRouterException{
 		// load WSDL
 		try {
-			wsdl = getResource(configuration.getWsdlFile());
-		} catch (IOException e) {
+			Document wsdlDoc = DocumentHelper.parseText(getResource(configuration.getWsdlFile()));
+			wsdl = wsdlDoc.getRootElement();
+		} catch (IOException | DocumentException e) {
 			throw new SoapRouterException(e.getMessage());
 		}
 		//load XSDs
